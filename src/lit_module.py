@@ -5,7 +5,7 @@ import torch.nn as nn
 from lightning.pytorch import LightningModule
 
 from src.model import UNet4
-from src.utils import dice_score, dice_score_oil, water_false_positive_rate, predict_full_image, dice_score_from_probs, iou_score_from_probs
+from src.utils import dice_score_oil, water_false_positive_rate, predict_full_image, dice_score_from_probs, iou_score_from_probs
 
 
 class OilSpillLitModule(LightningModule):
@@ -66,10 +66,28 @@ class OilSpillLitModule(LightningModule):
             crop_size=self.hparams.infer_crop_size,
             overlap=self.hparams.infer_overlap,
         )
-        mask = mask[0].cpu()
-        dice = dice_score_from_probs(probs, mask[0])
-        iou = iou_score_from_probs(probs, mask[0])
-        return dice, iou
+        mask_cpu = mask[0].cpu()
+        return probs, mask_cpu
+
+    def _log_full_image_metrics(self, split, image, mask, class_name):
+        probs, target = self._eval_full_image(image, mask)
+        prediction = probs > 0.5
+        predicted_area = prediction.float().mean()
+        if class_name == "oil":
+            if target.sum() <= 0:
+                raise ValueError("Manifest labels an image as oil but its mask is empty")
+            dice = dice_score_from_probs(probs, target)
+            iou = iou_score_from_probs(probs, target)
+            self.log(f"{split}_oil_dice", dice, on_epoch=True, sync_dist=True, batch_size=1)
+            self.log(f"{split}_oil_iou", iou, on_epoch=True, sync_dist=True, batch_size=1)
+        elif class_name in {"lookalike", "no_oil"}:
+            if target.sum() > 0:
+                raise ValueError(f"Manifest labels {class_name!r} image but its mask contains oil")
+            false_positive = prediction.any().float()
+            self.log(f"{split}_{class_name}_fp_rate", false_positive, on_epoch=True, sync_dist=True, batch_size=1)
+            self.log(f"{split}_{class_name}_predicted_oil_area", predicted_area, on_epoch=True, sync_dist=True, batch_size=1)
+        else:
+            raise ValueError(f"Unsupported manifest class {class_name!r}")
 
 
     def training_step(self, batch, batch_idx):
@@ -78,16 +96,12 @@ class OilSpillLitModule(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch
-        dice, iou = self._eval_full_image(x[0], y[0])
-        self.log("val_dice", dice, on_epoch=True, sync_dist=True)
-        self.log("val_iou", iou, on_epoch=True, sync_dist=True)
+        x, y, class_names = batch
+        self._log_full_image_metrics("val", x[0], y[0], class_names[0])
 
     def test_step(self, batch, batch_idx):
-        x, y = batch
-        dice, iou = self._eval_full_image(x[0], y[0])
-        self.log("test_dice", dice, on_epoch=True, sync_dist=True)
-        self.log("test_iou", iou, on_epoch=True, sync_dist=True)
+        x, y, class_names = batch
+        self._log_full_image_metrics("test", x[0], y[0], class_names[0])
 
 
 
@@ -108,6 +122,6 @@ class OilSpillLitModule(LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val_dice",
+                "monitor": "val_oil_dice",
             },
         }

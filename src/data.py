@@ -27,10 +27,10 @@ def load_manifest_pairs(manifest_csv, data_root, split, classes=None):
 
     root = Path(data_root)
     pairs = [
-        (root / row["image_path"], root / row["mask_path"])
+        (root / row["image_path"], root / row["mask_path"], row["class_name"])
         for row in rows
     ]
-    missing = [path for image, mask in pairs for path in (image, mask) if not path.is_file()]
+    missing = [path for image, mask, _ in pairs for path in (image, mask) if not path.is_file()]
     if missing:
         raise FileNotFoundError(missing[:5])
     return pairs
@@ -54,19 +54,28 @@ def read_tif_window(path: Path, x: int, y: int, width: int, height: int, bands: 
         return src.read(indexes=list(bands), window=window)
 
 
-def normalize_image(image: np.ndarray) -> np.ndarray:
-    """Clip and standardize two SAR channels in VH, VV order."""
+_CLIP_MIN = np.array([-40.0, -30.0], dtype=np.float32)
+_CLIP_MAX = np.array([-5.0, 0.0], dtype=np.float32)
+_MEAN = np.array([-32.061756, -22.321358], dtype=np.float32)
+_STD = np.array([7.5877995, 7.037356], dtype=np.float32)
+
+
+def normalize_image(image: np.ndarray, bands: Optional[Sequence[int]] = None) -> np.ndarray:
+    """Clip and standardize SAR channels. Band 1 is VH and band 2 is VV."""
     image = image.astype(np.float32)
-    if image.ndim != 3 or image.shape[0] != 2:
+    if bands is None:
+        bands = tuple(range(1, image.shape[0] + 1))
+    index = [band - 1 for band in bands]
+    if image.ndim != 3 or image.shape[0] != len(index) or any(i not in (0, 1) for i in index):
         raise ValueError(
-            f"Expected exactly two image bands in VH, VV order; got shape {image.shape}. "
+            f"Expected bands {list(bands)} in VH, VV order; got shape {image.shape}. "
             "Set --image-bands to the correct 1-based raster band indexes."
         )
 
-    clip_min = np.array([-40.0, -30.0], dtype=np.float32)[:, None, None]
-    clip_max = np.array([-5.0, 0.0], dtype=np.float32)[:, None, None]
-    mean = np.array([-32.061756, -22.321358], dtype=np.float32)[:, None, None]
-    std = np.array([7.5877995, 7.037356], dtype=np.float32)[:, None, None]
+    clip_min = _CLIP_MIN[index][:, None, None]
+    clip_max = _CLIP_MAX[index][:, None, None]
+    mean = _MEAN[index][:, None, None]
+    std = _STD[index][:, None, None]
     return (np.clip(image, clip_min, clip_max) - mean) / (std + 1e-6)
 
 def prepare_mask(mask: np.ndarray) -> np.ndarray:
@@ -102,7 +111,7 @@ class CropManifestDataset(Dataset):
         width, height = int(row["crop_width"]), int(row["crop_height"])
         image = normalize_image(read_tif_window(
             self.data_root / row["image_path"], x, y, width, height, bands=self.image_bands
-        ))
+        ), bands=self.image_bands)
         mask = prepare_mask(read_tif_window(
             self.data_root / row["mask_path"], x, y, width, height
         ))
@@ -122,7 +131,7 @@ class OilSpillDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, index):
-        image_path, mask_path = self.pairs[index]
-        image = normalize_image(read_tif(image_path, bands=self.image_bands))
+        image_path, mask_path, class_name = self.pairs[index]
+        image = normalize_image(read_tif(image_path, bands=self.image_bands), bands=self.image_bands)
         mask = prepare_mask(read_tif(mask_path))
-        return torch.from_numpy(image).float(), torch.from_numpy(mask).float().unsqueeze(0)
+        return torch.from_numpy(image).float(), torch.from_numpy(mask).float().unsqueeze(0), class_name

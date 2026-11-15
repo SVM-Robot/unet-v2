@@ -50,7 +50,7 @@ class OilSpillDataModule(LightningDataModule):
                 raise RuntimeError("No test images for the selected classes")
         if self.in_channels is None:
             probe = OilSpillDataset(self.val_pairs or self.test_pairs, image_bands=self.image_bands, sample_mode=True)
-            image, _ = probe[0]
+            image, _, _ = probe[0]
             self.in_channels = image.shape[0]
 
     def train_dataloader(self) -> DataLoader:

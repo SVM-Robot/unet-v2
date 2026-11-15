@@ -20,8 +20,8 @@ class EpochPrinter(Callback):
             f"epoch={trainer.current_epoch + 1:03d} "
             f"train_loss={m.get('train_loss', float('nan')):.4f} "
             f"train_dice={m.get('train_dice', float('nan')):.4f} "
-            f"val_dice={m.get('val_dice', float('nan')):.4f} "
-            f"val_iou={m.get('val_iou', float('nan')):.4f}"
+            f"val_oil_dice={m.get('val_oil_dice', float('nan')):.4f} "
+            f"val_oil_iou={m.get('val_oil_iou', float('nan')):.4f}"
         )
 
 def parse_args():
@@ -48,8 +48,6 @@ def parse_args():
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--depth", type=int, default=4, help="UNet depth")
     parser.add_argument("--device", type=str, default=None, help="Device to use for training (e.g., 'cuda', 'cpu', 'mps'). If not specified, will use 'cuda' if available, otherwise 'cpu'.")
-    parser.add_argument("--test", action="store_true", help="Run evaluation on the test set after training.", default=False)
-    parser.add_argument("--test-overlap", type=float, default=0.25, help="Overlap fraction used when running patch-based inference on the test set.")
     parser.add_argument("--lwc", type=int, default=1)
     parser.add_argument("--batch-norm", action="store_true", default=False)
     parser.add_argument("--dropout-rate", type=float, default=0.0)
@@ -121,7 +119,7 @@ def main():
         ModelCheckpoint(
             dirpath=output_dir,
             filename="best",
-            monitor="val_dice",
+            monitor="val_oil_dice",
             mode="max",
             save_top_k=1,
             save_last=True,
@@ -132,7 +130,7 @@ def main():
     if args.early_stopping:
         callbacks.append(
             EarlyStopping(
-                monitor="val_dice",
+                monitor="val_oil_dice",
                 mode="max",
                 patience=10,
             )
@@ -164,12 +162,9 @@ def main():
     if checkpoint_callback.best_model_path:
         print(
             f"Best checkpoint: {checkpoint_callback.best_model_path} "
-            f"(val_dice={checkpoint_callback.best_model_score:.4f})."
+            f"(val_oil_dice={checkpoint_callback.best_model_score:.4f})."
         )
 
-
-    #
-    #trainer.test(model, datamodule, ckpt_path="best")
 
 
 

@@ -83,7 +83,7 @@ def main():
         image_bands=image_bands,
         sample_mode=True,
     )
-    sample_image, _ = dataset[0]
+    sample_image, _, _ = dataset[0]
     in_channels = sample_image.shape[0]
     device = args.device
 
@@ -100,8 +100,8 @@ def main():
     print(f"data config: image_bands={image_bands}, normalization=Trujillo per-band")
     print("Using device:", device)
 
-    total_dice = 0.0
-    total_iou = 0.0
+    metrics = {name: {"count": 0, "dice": [], "iou": [], "fp": [], "predicted_oil_area": []}
+               for name in ("oil", "lookalike", "no_oil")}
     if args.max_samples >= 0:
         tot_samples = min(len(dataset), args.max_samples)
     else:
@@ -109,7 +109,7 @@ def main():
     if tot_samples == 0:
         raise ValueError("No test samples selected; --max-samples must be positive")
 
-    for i, (image, mask) in enumerate(dataset):
+    for i, (image, mask, class_name) in enumerate(dataset):
         if i >= tot_samples:
             break
 
@@ -122,22 +122,40 @@ def main():
         )
         mask_cpu = mask[0].cpu()
 
-        sample_dice = float(dice_score_from_probs(probs, mask_cpu, threshold=args.threshold).item())
-        total_dice += sample_dice
+        if class_name not in metrics:
+            raise ValueError(f"Unsupported manifest class {class_name!r}")
+        bucket = metrics[class_name]
+        bucket["count"] += 1
+        predicted = probs > args.threshold
+        predicted_area = float(predicted.float().mean().item())
+        if class_name == "oil":
+            if mask_cpu.sum() <= 0:
+                raise ValueError("Manifest labels an image as oil but its mask is empty")
+            bucket["dice"].append(float(dice_score_from_probs(probs, mask_cpu, threshold=args.threshold).item()))
+            bucket["iou"].append(float(iou_score_from_probs(probs, mask_cpu, threshold=args.threshold).item()))
+        else:
+            if mask_cpu.sum() > 0:
+                raise ValueError(f"Manifest labels {class_name!r} image but its mask contains oil")
+            bucket["fp"].append(float(predicted.any().item()))
+            bucket["predicted_oil_area"].append(predicted_area)
 
-        sample_iou = float(iou_score_from_probs(probs, mask_cpu, threshold=args.threshold).item())
-        total_iou += sample_iou
-
-    mean_dice = total_dice / tot_samples
-    mean_iou = total_iou / tot_samples
-    summary = {"mean_test_dice": mean_dice, "mean_test_iou": mean_iou, "num_samples": tot_samples}
+    summary = {"threshold": args.threshold, "num_samples": tot_samples, "by_class": {}}
+    for class_name, bucket in metrics.items():
+        result = {"count": bucket["count"]}
+        for metric in ("dice", "iou", "fp", "predicted_oil_area"):
+            values = bucket[metric]
+            if values:
+                key = {"dice": "mean_dice", "iou": "mean_iou", "fp": "false_positive_image_rate",
+                       "predicted_oil_area": "mean_predicted_oil_area"}[metric]
+                result[key] = sum(values) / len(values)
+        summary["by_class"][class_name] = result
 
     with open(output_dir / "test_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     print(
         f"\n***\nTest Results:\n"
-        f"mean test dice: {mean_dice:.4f}, mean test iou: {mean_iou:.4f}. "
+        f"class metrics: {summary['by_class']}. "
         f"({tot_samples} test samples)\n***\n"
     )
     print("=== Test finished ===")
