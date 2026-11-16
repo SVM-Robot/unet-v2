@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-
+import json
 import lightning as L
 import torch
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, Callback
@@ -21,7 +21,10 @@ class EpochPrinter(Callback):
             f"train_loss={m.get('train_loss', float('nan')):.4f} "
             f"train_dice={m.get('train_dice', float('nan')):.4f} "
             f"val_oil_dice={m.get('val_oil_dice', float('nan')):.4f} "
-            f"val_oil_iou={m.get('val_oil_iou', float('nan')):.4f}"
+            f"val_oil_iou={m.get('val_oil_iou', float('nan')):.4f} "
+            f"val_lk_area={m.get('val_lookalike_predicted_oil_area', float('nan')):.4f} "
+            f"val_no_oil_area={m.get('val_no_oil_predicted_oil_area', float('nan')):.4f} "
+            f"val_score={m.get('val_score', float('nan')):.4f}"
         )
 
 def parse_args():
@@ -48,12 +51,15 @@ def parse_args():
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--depth", type=int, default=4, help="UNet depth")
     parser.add_argument("--device", type=str, default=None, help="Device to use for training (e.g., 'cuda', 'cpu', 'mps'). If not specified, will use 'cuda' if available, otherwise 'cpu'.")
-    parser.add_argument("--lwc", type=int, default=1)
+    parser.add_argument("--lwc", type=float, default=1.0)
+    parser.add_argument("--loss", choices=["bce", "bce_dice"], default="bce")
+    parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--batch-norm", action="store_true", default=False)
     parser.add_argument("--dropout-rate", type=float, default=0.0)
     parser.add_argument("--early-stopping", action="store_true", default=False)
     parser.add_argument("--lr-scheduler", action="store_true", default=False)
     parser.add_argument("--bi-upsample", action="store_true", default=False)
+    parser.add_argument("--crop-cache-dir", type=str, default=None, help="Pre-extracted .npy crops. Omit to read GeoTIFF windows.")
     return parser.parse_args()
 
 
@@ -70,9 +76,11 @@ def _resolve_accelerator(device: str | None) -> tuple[str, int]:
 def main():
     args = parse_args()
     L.seed_everything(args.seed, workers=True)
+    torch.set_float32_matmul_precision("high")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "train_args.json").write_text(json.dumps(vars(args), indent=2))
 
     sampling = CropSamplingConfig(
         crop_size=args.crop_size,
@@ -86,6 +94,7 @@ def main():
         max_positive_crops_per_scene=args.max_positive_crops_per_scene,
     )
     print(summarize_crops(select_training_crops(load_crop_rows(args.crop_manifest_csv), sampling)))
+    accelerator, devices = _resolve_accelerator(args.device)
     datamodule = OilSpillDataModule(
         manifest_csv=args.manifest_csv,
         crop_manifest_csv=args.crop_manifest_csv,
@@ -95,6 +104,9 @@ def main():
         classes=args.classes,
         batch_size=args.batch_size,
         image_bands=args.image_bands,
+        num_workers=args.num_workers,
+        pin_memory=(accelerator == "gpu"),
+        crop_cache_dir=args.crop_cache_dir,
     )
     datamodule.setup()
 
@@ -110,16 +122,16 @@ def main():
         lr_scheduler=args.lr_scheduler,
         infer_crop_size=sampling.crop_size,
         infer_overlap=args.infer_overlap,
+        loss_type=args.loss,
     )
 
-    accelerator, devices = _resolve_accelerator(args.device)
     print("Using accelerator:", accelerator)
 
     callbacks = [
         ModelCheckpoint(
             dirpath=output_dir,
             filename="best",
-            monitor="val_oil_dice",
+            monitor="val_score",
             mode="max",
             save_top_k=1,
             save_last=True,
@@ -130,7 +142,7 @@ def main():
     if args.early_stopping:
         callbacks.append(
             EarlyStopping(
-                monitor="val_oil_dice",
+                monitor="val_score",
                 mode="max",
                 patience=10,
             )
@@ -162,7 +174,7 @@ def main():
     if checkpoint_callback.best_model_path:
         print(
             f"Best checkpoint: {checkpoint_callback.best_model_path} "
-            f"(val_oil_dice={checkpoint_callback.best_model_score:.4f})."
+            f"(val_score={checkpoint_callback.best_model_score:.4f})."
         )
 
 

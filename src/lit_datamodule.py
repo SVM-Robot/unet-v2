@@ -23,6 +23,7 @@ class OilSpillDataModule(LightningDataModule):
         image_bands: Optional[Sequence[int]] = None,
         num_workers: int = 0,
         pin_memory: bool = False,
+        crop_cache_dir: str | Path | None = None,
     ):
         super().__init__()
         self.manifest_csv = manifest_csv
@@ -35,6 +36,7 @@ class OilSpillDataModule(LightningDataModule):
         self.image_bands = image_bands
         self.num_workers = num_workers
         self.pin_memory = pin_memory
+        self.crop_cache_dir = crop_cache_dir
         self.val_pairs = None
         self.test_pairs = None
         self.in_channels: Optional[int] = None
@@ -60,6 +62,7 @@ class OilSpillDataModule(LightningDataModule):
             self.sampling_config,
             image_bands=self.image_bands,
             output_dir=self.output_dir,
+            crop_cache_dir=self.crop_cache_dir,
         )
         return DataLoader(
             dataset,
@@ -67,11 +70,19 @@ class OilSpillDataModule(LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            persistent_workers=self.num_workers > 0,
         )
 
     def _full_image_loader(self, pairs) -> DataLoader:
         dataset = OilSpillDataset(pairs, image_bands=self.image_bands, sample_mode=True)
-        return DataLoader(dataset, batch_size=1, shuffle=False, num_workers=self.num_workers, pin_memory=self.pin_memory)
+        return DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
+            persistent_workers=self.num_workers > 0,
+        )
 
     def val_dataloader(self) -> DataLoader:
         return self._full_image_loader(self.val_pairs)
