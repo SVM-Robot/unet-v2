@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 
 from src.crop_sampling import CropSamplingConfig
 from src.data import CropManifestDataset, OilSpillDataset, load_manifest_pairs
+from src.wind import WindTable
 
 
 class OilSpillDataModule(LightningDataModule):
@@ -24,6 +25,7 @@ class OilSpillDataModule(LightningDataModule):
         num_workers: int = 0,
         pin_memory: bool = False,
         crop_cache_dir: str | Path | None = None,
+        wind_point_npz: str | Path | None = None,
     ):
         super().__init__()
         self.manifest_csv = manifest_csv
@@ -37,6 +39,7 @@ class OilSpillDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.crop_cache_dir = crop_cache_dir
+        self.wind_table = WindTable(wind_point_npz) if wind_point_npz else None
         self.val_pairs = None
         self.test_pairs = None
         self.in_channels: Optional[int] = None
@@ -53,7 +56,7 @@ class OilSpillDataModule(LightningDataModule):
         if self.in_channels is None:
             probe = OilSpillDataset(self.val_pairs or self.test_pairs, image_bands=self.image_bands, sample_mode=True)
             image, _, _ = probe[0]
-            self.in_channels = image.shape[0]
+            self.in_channels = image.shape[0] + (2 if self.wind_table is not None else 0)
 
     def train_dataloader(self) -> DataLoader:
         dataset = CropManifestDataset(
@@ -63,6 +66,7 @@ class OilSpillDataModule(LightningDataModule):
             image_bands=self.image_bands,
             output_dir=self.output_dir,
             crop_cache_dir=self.crop_cache_dir,
+            wind=self.wind_table,
         )
         return DataLoader(
             dataset,
@@ -74,7 +78,7 @@ class OilSpillDataModule(LightningDataModule):
         )
 
     def _full_image_loader(self, pairs) -> DataLoader:
-        dataset = OilSpillDataset(pairs, image_bands=self.image_bands, sample_mode=True)
+        dataset = OilSpillDataset(pairs, image_bands=self.image_bands, sample_mode=True, wind=self.wind_table)
         return DataLoader(
             dataset,
             batch_size=1,

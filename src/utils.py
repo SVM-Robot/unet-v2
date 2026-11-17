@@ -76,11 +76,18 @@ def iou_score_from_probs(probs, targets, threshold: float = 0.5, eps: float = 1e
 
 
 
-def predict_full_image(model, image, device, crop_size=-1, overlap=0.0):
+def predict_full_image(model, image, device, crop_size=-1, overlap=0.0, wind=None):
     image = image.float()
+    if wind is not None:
+        wind = wind.float()
+
+    def logits_of(patch):
+        wind_batch = None if wind is None else wind.unsqueeze(0).to(device)
+        with torch.no_grad():
+            return model(patch.unsqueeze(0).to(device), wind_batch)
 
     if crop_size <= 0:
-        logits = model(image.unsqueeze(0).to(device))
+        logits = logits_of(image)
         return torch.sigmoid(logits)[0, 0].cpu()
 
     if not 0.0 <= overlap < 1.0:
@@ -108,8 +115,7 @@ def predict_full_image(model, image, device, crop_size=-1, overlap=0.0):
                     (0, crop_size - patch.shape[2], 0, crop_size - patch.shape[1]),
                 )
 
-            with torch.no_grad():
-                logits = model(patch.unsqueeze(0).to(device))
+            logits = logits_of(patch)
             probs = torch.sigmoid(logits)[0, 0].cpu()
 
             valid_h = min(crop_size, h - top)

@@ -60,6 +60,7 @@ def parse_args():
     parser.add_argument("--lr-scheduler", action="store_true", default=False)
     parser.add_argument("--bi-upsample", action="store_true", default=False)
     parser.add_argument("--crop-cache-dir", type=str, default=None, help="Pre-extracted .npy crops. Omit to read GeoTIFF windows.")
+    parser.add_argument("--wind-point-npz", type=str, default=None, help="Per-sample u10/v10. Appended as two constant channels.")
     return parser.parse_args()
 
 
@@ -107,8 +108,17 @@ def main():
         num_workers=args.num_workers,
         pin_memory=(accelerator == "gpu"),
         crop_cache_dir=args.crop_cache_dir,
+        wind_point_npz=args.wind_point_npz,
     )
     datamodule.setup()
+
+    wind_mode = "none"
+    if datamodule.wind_table is not None:
+        wind_mode = "point_channels"
+        print(
+            f"Wind point channels: mean={datamodule.wind_table.mean.tolist()} "
+            f"std={datamodule.wind_table.std.tolist()} in_channels={datamodule.in_channels}"
+        )
 
     model = OilSpillLitModule(
         in_channels=datamodule.in_channels,
@@ -123,6 +133,7 @@ def main():
         infer_crop_size=sampling.crop_size,
         infer_overlap=args.infer_overlap,
         loss_type=args.loss,
+        wind_mode=wind_mode,
     )
 
     print("Using accelerator:", accelerator)

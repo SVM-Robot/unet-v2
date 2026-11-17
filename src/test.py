@@ -12,6 +12,7 @@ from src.data import OilSpillDataset, load_manifest_pairs
 from src.lit_module import OilSpillLitModule
 from src.utils import set_seed, dice_score_from_probs, iou_score_from_probs
 from src.utils import predict_full_image
+from src.wind import WindTable
 
 
 def load_model(checkpoint_path: Path, device: str, in_channels: int, args: argparse.Namespace) -> OilSpillLitModule:
@@ -61,6 +62,7 @@ def parse_args():
     parser.add_argument("--dropout-rate", type=float, default=0.0, help="Fallback for legacy .pt checkpoints only")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--bi-upsample", action="store_true", default=False, help="Fallback for legacy .pt checkpoints only")
+    parser.add_argument("--wind-point-npz", type=str, default=None, help="Required when the checkpoint was trained with point wind channels.")
     return parser.parse_args()
 
 
@@ -89,6 +91,18 @@ def main():
 
     model = load_model(checkpoint_path, device, in_channels, args)
     hparams = model.hparams
+    wind_mode = hparams.get("wind_mode", "none")
+    if wind_mode == "point_channels" and not args.wind_point_npz:
+        raise RuntimeError("This checkpoint expects --wind-point-npz")
+    if wind_mode != "point_channels" and args.wind_point_npz:
+        raise RuntimeError("This checkpoint was trained without wind; omit --wind-point-npz")
+    if args.wind_point_npz:
+        dataset = OilSpillDataset(
+            test_pairs,
+            image_bands=image_bands,
+            sample_mode=True,
+            wind=WindTable(args.wind_point_npz),
+        )
 
     print("=== Test start ===\n")
     print(f"checkpoint: {checkpoint_path}")
@@ -97,7 +111,7 @@ def main():
         f"batch_norm={hparams.batch_norm}, dropout_rate={hparams.dropout_rate}, "
         f"bi_upsample={hparams.bi_upsample}"
     )
-    print(f"data config: image_bands={image_bands}, normalization=Trujillo per-band")
+    print(f"data config: image_bands={image_bands}, normalization=Trujillo per-band, wind_mode={wind_mode}")
     print("Using device:", device)
 
     metrics = {name: {"count": 0, "dice": [], "iou": [], "fp": [], "predicted_oil_area": []}
@@ -109,9 +123,14 @@ def main():
     if tot_samples == 0:
         raise ValueError("No test samples selected; --max-samples must be positive")
 
-    for i, (image, mask, class_name) in enumerate(dataset):
+    for i, item in enumerate(dataset):
         if i >= tot_samples:
             break
+        if isinstance(item, dict):
+            image, mask, class_name, wind = item["image"], item["mask"], item["class_name"], item["wind"]
+        else:
+            image, mask, class_name = item
+            wind = None
 
         probs = predict_full_image(
             model,
@@ -119,6 +138,7 @@ def main():
             device=device,
             crop_size=args.crop_size,
             overlap=args.test_overlap,
+            wind=wind,
         )
         mask_cpu = mask[0].cpu()
 

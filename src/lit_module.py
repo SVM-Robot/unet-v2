@@ -24,9 +24,19 @@ class OilSpillLitModule(LightningModule):
         infer_crop_size: int = 512,
         infer_overlap: float = 0.25,
         loss_type: str = "bce",
+        wind_mode: str = "none",
+        wind_mean: list[float] | None = None,
+        wind_std: list[float] | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
+
+        if wind_mode not in {"none", "point_channels"}:
+            raise ValueError(f"Unsupported wind_mode {wind_mode!r}")
+        # Older checkpoints stored these buffers. Normalization now happens in WindTable.
+        if wind_mean is not None and wind_std is not None:
+            self.register_buffer("wind_mean", torch.tensor(wind_mean, dtype=torch.float32))
+            self.register_buffer("wind_std", torch.tensor(wind_std, dtype=torch.float32))
 
         self.model = UNet4(
             in_channels=in_channels,
@@ -45,7 +55,12 @@ class OilSpillLitModule(LightningModule):
         self._val_lk_area = []
         self._val_no_oil_area = []
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, wind: torch.Tensor | None = None) -> torch.Tensor:
+        if self.hparams.wind_mode == "point_channels":
+            if wind is None:
+                raise ValueError("point_channels model requires a wind vector")
+            wind = wind[:, :, None, None].expand(-1, -1, x.shape[-2], x.shape[-1])
+            x = torch.cat([x, wind], dim=1)
         return self.model(x)
 
     def _compute_loss(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -61,10 +76,14 @@ class OilSpillLitModule(LightningModule):
         raise ValueError(f"Unknown loss_type {self.hparams.loss_type!r}")
 
     def _shared_step(self, batch):
-        x, y = batch
-        logits = self(x)
+        if isinstance(batch, dict):
+            x, wind, y = batch["image"], batch["wind"], batch["mask"]
+        else:
+            x, y = batch
+            wind = None
+        logits = self(x, wind)
         loss = self._compute_loss(logits, y)
-        return loss, dice_score_oil(logits, y), water_false_positive_rate(logits, y)
+        return loss, dice_score_oil(logits, y), water_false_positive_rate(logits, y), y
 
     def _log_split(self, split, loss, dice, water_fp, y):
         self.log(f"{split}_loss", loss, on_step=False, on_epoch=True, sync_dist=split != "train")
@@ -75,17 +94,18 @@ class OilSpillLitModule(LightningModule):
         if water_fp is not None:
             self.log(f"{split}_water_fp", water_fp, on_step=False, on_epoch=True, sync_dist=split != "train", batch_size=water_tiles)
 
-    def _eval_full_image(self, image, mask):
+    def _eval_full_image(self, image, mask, wind=None):
         probs = predict_full_image(
             self, image, self.device,
             crop_size=self.hparams.infer_crop_size,
             overlap=self.hparams.infer_overlap,
+            wind=wind,
         )
         mask_cpu = mask[0].cpu()
         return probs, mask_cpu
 
-    def _log_full_image_metrics(self, split, image, mask, class_name):
-        probs, target = self._eval_full_image(image, mask)
+    def _log_full_image_metrics(self, split, image, mask, class_name, wind=None):
+        probs, target = self._eval_full_image(image, mask, wind)
         prediction = probs > 0.5
         predicted_area = prediction.float().mean()
         if class_name == "oil":
@@ -113,13 +133,20 @@ class OilSpillLitModule(LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        loss, dice, water_fp = self._shared_step(batch)
-        self._log_split("train", loss, dice, water_fp, batch[1])
+        loss, dice, water_fp, y = self._shared_step(batch)
+        self._log_split("train", loss, dice, water_fp, y)
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    def _full_image_example(self, batch):
+        if isinstance(batch, dict):
+            wind = batch["wind"][0] if "wind" in batch else None
+            return batch["image"][0], batch["mask"][0], batch["class_name"][0], wind
         x, y, class_names = batch
-        self._log_full_image_metrics("val", x[0], y[0], class_names[0])
+        return x[0], y[0], class_names[0], None
+
+    def validation_step(self, batch, batch_idx):
+        image, mask, class_name, wind = self._full_image_example(batch)
+        self._log_full_image_metrics("val", image, mask, class_name, wind)
 
     def on_validation_epoch_end(self):
         oil_dice = (
@@ -146,8 +173,8 @@ class OilSpillLitModule(LightningModule):
         self._val_no_oil_area.clear()
 
     def test_step(self, batch, batch_idx):
-        x, y, class_names = batch
-        self._log_full_image_metrics("test", x[0], y[0], class_names[0])
+        image, mask, class_name, wind = self._full_image_example(batch)
+        self._log_full_image_metrics("test", image, mask, class_name, wind)
 
 
 

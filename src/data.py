@@ -14,7 +14,7 @@ from torch.utils.data import Dataset
 import random
 
 def load_manifest_pairs(manifest_csv, data_root, split, classes=None):
-    required_columns = {"split", "image_path", "mask_path", "class_name"}
+    required_columns = {"split", "image_path", "mask_path", "class_name", "sample_id"}
     with open(manifest_csv, newline="", encoding="utf-8") as manifest_file:
         reader = csv.DictReader(manifest_file)
         missing_columns = required_columns - set(reader.fieldnames or ())
@@ -27,10 +27,10 @@ def load_manifest_pairs(manifest_csv, data_root, split, classes=None):
 
     root = Path(data_root)
     pairs = [
-        (root / row["image_path"], root / row["mask_path"], row["class_name"])
+        (root / row["image_path"], root / row["mask_path"], row["class_name"], row["sample_id"])
         for row in rows
     ]
-    missing = [path for image, mask, _ in pairs for path in (image, mask) if not path.is_file()]
+    missing = [path for image, mask, _, _ in pairs for path in (image, mask) if not path.is_file()]
     if missing:
         raise FileNotFoundError(missing[:5])
     return pairs
@@ -98,12 +98,14 @@ class CropManifestDataset(Dataset):
         image_bands: Optional[Sequence[int]] = (1, 2),
         output_dir=None,
         crop_cache_dir=None,
+        wind=None,
     ):
         from src.crop_sampling import load_crop_rows, save_selected_manifest, select_training_crops
 
         self.data_root = Path(data_root)
         self.image_bands = image_bands
         self.crop_cache_dir = Path(crop_cache_dir) if crop_cache_dir else None
+        self.wind = wind
         self.rows = select_training_crops(load_crop_rows(manifest_csv), sampling_config)
         if output_dir is not None:
             save_selected_manifest(self.rows, output_dir, sampling_config, manifest_csv)
@@ -145,23 +147,41 @@ class CropManifestDataset(Dataset):
             mask = prepare_mask(read_tif_window(
                 self.data_root / row["mask_path"], x, y, width, height
             ))
-            if image.shape[-2:] != (height, width) or mask.shape != (height, width):
-                raise ValueError(f"Crop {row['image_id']} at {(x, y)} has image {image.shape} and mask {mask.shape}")
-        return torch.from_numpy(image).float(), torch.from_numpy(mask).float().unsqueeze(0)
+        if image.shape[-2:] != (height, width) or mask.shape != (height, width):
+            raise ValueError(f"Crop {row['image_id']} at {(x, y)} has image {image.shape} and mask {mask.shape}")
+        image_tensor = torch.from_numpy(image).float()
+        mask_tensor = torch.from_numpy(mask).float().unsqueeze(0)
+        if self.wind is None:
+            return image_tensor, mask_tensor
+        return {
+            "image": image_tensor,
+            "wind": torch.from_numpy(self.wind.uv(row["image_id"])),
+            "mask": mask_tensor,
+        }
 
 
 
 class OilSpillDataset(Dataset):
-    def __init__(self, pairs, image_bands=None, crop_size=None, sample_mode=False, image_size=2048):
+    def __init__(self, pairs, image_bands=None, crop_size=None, sample_mode=False, image_size=2048, wind=None):
         self.pairs = list(pairs)
         self.image_bands = image_bands
         self.sample_mode = sample_mode
+        self.wind = wind
 
     def __len__(self):
         return len(self.pairs)
 
     def __getitem__(self, index):
-        image_path, mask_path, class_name = self.pairs[index]
+        image_path, mask_path, class_name, sample_id = self.pairs[index]
         image = normalize_image(read_tif(image_path, bands=self.image_bands), bands=self.image_bands)
         mask = prepare_mask(read_tif(mask_path))
-        return torch.from_numpy(image).float(), torch.from_numpy(mask).float().unsqueeze(0), class_name
+        image_tensor = torch.from_numpy(image).float()
+        mask_tensor = torch.from_numpy(mask).float().unsqueeze(0)
+        if self.wind is None:
+            return image_tensor, mask_tensor, class_name
+        return {
+            "image": image_tensor,
+            "wind": torch.from_numpy(self.wind.uv(sample_id)),
+            "mask": mask_tensor,
+            "class_name": class_name,
+        }
