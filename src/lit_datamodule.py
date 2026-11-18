@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from src.crop_sampling import CropSamplingConfig
 from src.data import CropManifestDataset, OilSpillDataset, load_manifest_pairs
-from src.wind import WindTable
+from src.wind import open_wind_table
 
 
 class OilSpillDataModule(LightningDataModule):
@@ -25,7 +25,10 @@ class OilSpillDataModule(LightningDataModule):
         num_workers: int = 0,
         pin_memory: bool = False,
         crop_cache_dir: str | Path | None = None,
+        wind_mode: str = "none",
         wind_point_npz: str | Path | None = None,
+        wind_grid_npz: str | Path | None = None,
+        wind_norm: str = "normal",
     ):
         super().__init__()
         self.manifest_csv = manifest_csv
@@ -39,7 +42,9 @@ class OilSpillDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.crop_cache_dir = crop_cache_dir
-        self.wind_table = WindTable(wind_point_npz) if wind_point_npz else None
+        self.wind_mode = wind_mode
+        self.wind_norm = wind_norm
+        self.wind_table = open_wind_table(wind_mode, wind_point_npz, wind_grid_npz, wind_norm)
         self.val_pairs = None
         self.test_pairs = None
         self.in_channels: Optional[int] = None
@@ -56,7 +61,8 @@ class OilSpillDataModule(LightningDataModule):
         if self.in_channels is None:
             probe = OilSpillDataset(self.val_pairs or self.test_pairs, image_bands=self.image_bands, sample_mode=True)
             image, _, _ = probe[0]
-            self.in_channels = image.shape[0] + (2 if self.wind_table is not None else 0)
+            extra = 2 if self.wind_mode == "point_channels" else 0
+            self.in_channels = image.shape[0] + extra
 
     def train_dataloader(self) -> DataLoader:
         dataset = CropManifestDataset(

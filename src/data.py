@@ -155,7 +155,7 @@ class CropManifestDataset(Dataset):
             return image_tensor, mask_tensor
         return {
             "image": image_tensor,
-            "wind": torch.from_numpy(self.wind.uv(row["image_id"])),
+            "wind": torch.from_numpy(self.wind.condition(row["image_id"])),
             "mask": mask_tensor,
         }
 
@@ -181,7 +181,7 @@ class OilSpillDataset(Dataset):
             return image_tensor, mask_tensor, class_name
         return {
             "image": image_tensor,
-            "wind": torch.from_numpy(self.wind.uv(sample_id)),
+            "wind": torch.from_numpy(self.wind.condition(sample_id)),
             "mask": mask_tensor,
             "class_name": class_name,
         }

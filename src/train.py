@@ -11,6 +11,7 @@ from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from src.lit_datamodule import OilSpillDataModule
 from src.lit_module import OilSpillLitModule
 from src.crop_sampling import CropSamplingConfig, summarize_crops, load_crop_rows, select_training_crops
+from src.wind import WIND_MODES, WIND_NORMS, film_wind_dim, resolve_wind_mode
 
 
 class EpochPrinter(Callback):
@@ -60,7 +61,10 @@ def parse_args():
     parser.add_argument("--lr-scheduler", action="store_true", default=False)
     parser.add_argument("--bi-upsample", action="store_true", default=False)
     parser.add_argument("--crop-cache-dir", type=str, default=None, help="Pre-extracted .npy crops. Omit to read GeoTIFF windows.")
-    parser.add_argument("--wind-point-npz", type=str, default=None, help="Per-sample u10/v10. Appended as two constant channels.")
+    parser.add_argument("--wind-mode", choices=WIND_MODES, default="none")
+    parser.add_argument("--wind-point-npz", type=str, default=None, help="Point u10/v10/speed file. Alone, this selects point_channels.")
+    parser.add_argument("--wind-grid-npz", type=str, default=None, help="Grid u/v file for film_grid_flat and film_grid_cnn.")
+    parser.add_argument("--wind-norm", choices=WIND_NORMS, default="normal", help="normal is z-score. scale divides by sqrt(mean(u^2+v^2)).")
     return parser.parse_args()
 
 
@@ -96,6 +100,7 @@ def main():
     )
     print(summarize_crops(select_training_crops(load_crop_rows(args.crop_manifest_csv), sampling)))
     accelerator, devices = _resolve_accelerator(args.device)
+    wind_mode = resolve_wind_mode(args.wind_mode, args.wind_point_npz, args.wind_grid_npz)
     datamodule = OilSpillDataModule(
         manifest_csv=args.manifest_csv,
         crop_manifest_csv=args.crop_manifest_csv,
@@ -108,15 +113,17 @@ def main():
         num_workers=args.num_workers,
         pin_memory=(accelerator == "gpu"),
         crop_cache_dir=args.crop_cache_dir,
+        wind_mode=wind_mode,
         wind_point_npz=args.wind_point_npz,
+        wind_grid_npz=args.wind_grid_npz,
+        wind_norm=args.wind_norm,
     )
     datamodule.setup()
 
-    wind_mode = "none"
+    wind_dim = film_wind_dim(wind_mode, datamodule.wind_table)
     if datamodule.wind_table is not None:
-        wind_mode = "point_channels"
         print(
-            f"Wind point channels: mean={datamodule.wind_table.mean.tolist()} "
+            f"Wind {wind_mode} norm={args.wind_norm}: dim={wind_dim} mean={datamodule.wind_table.mean.tolist()} "
             f"std={datamodule.wind_table.std.tolist()} in_channels={datamodule.in_channels}"
         )
 
@@ -134,6 +141,8 @@ def main():
         infer_overlap=args.infer_overlap,
         loss_type=args.loss,
         wind_mode=wind_mode,
+        wind_dim=wind_dim,
+        wind_norm=args.wind_norm,
     )
 
     print("Using accelerator:", accelerator)

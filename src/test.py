@@ -12,7 +12,7 @@ from src.data import OilSpillDataset, load_manifest_pairs
 from src.lit_module import OilSpillLitModule
 from src.utils import set_seed, dice_score_from_probs, iou_score_from_probs
 from src.utils import predict_full_image
-from src.wind import WindTable
+from src.wind import FILM_GRID_MODES, open_wind_table
 
 
 def load_model(checkpoint_path: Path, device: str, in_channels: int, args: argparse.Namespace) -> OilSpillLitModule:
@@ -62,7 +62,8 @@ def parse_args():
     parser.add_argument("--dropout-rate", type=float, default=0.0, help="Fallback for legacy .pt checkpoints only")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--bi-upsample", action="store_true", default=False, help="Fallback for legacy .pt checkpoints only")
-    parser.add_argument("--wind-point-npz", type=str, default=None, help="Required when the checkpoint was trained with point wind channels.")
+    parser.add_argument("--wind-point-npz", type=str, default=None, help="Required for point-channel and point-FiLM checkpoints.")
+    parser.add_argument("--wind-grid-npz", type=str, default=None, help="Required for grid FiLM checkpoints.")
     return parser.parse_args()
 
 
@@ -92,16 +93,25 @@ def main():
     model = load_model(checkpoint_path, device, in_channels, args)
     hparams = model.hparams
     wind_mode = hparams.get("wind_mode", "none")
-    if wind_mode == "point_channels" and not args.wind_point_npz:
-        raise RuntimeError("This checkpoint expects --wind-point-npz")
-    if wind_mode != "point_channels" and args.wind_point_npz:
-        raise RuntimeError("This checkpoint was trained without wind; omit --wind-point-npz")
-    if args.wind_point_npz:
+    needs_point = wind_mode in {"point_channels", "film_uv", "film_uvw"} or wind_mode in FILM_GRID_MODES
+    needs_grid = wind_mode in FILM_GRID_MODES
+    if needs_point and not args.wind_point_npz:
+        raise RuntimeError(f"This checkpoint expects --wind-point-npz ({wind_mode})")
+    if needs_grid and not args.wind_grid_npz:
+        raise RuntimeError(f"This checkpoint expects --wind-grid-npz ({wind_mode})")
+    if wind_mode == "none" and (args.wind_point_npz or args.wind_grid_npz):
+        raise RuntimeError("This checkpoint was trained without wind; omit the wind npz flags")
+    if wind_mode != "none":
         dataset = OilSpillDataset(
             test_pairs,
             image_bands=image_bands,
             sample_mode=True,
-            wind=WindTable(args.wind_point_npz),
+            wind=open_wind_table(
+                wind_mode,
+                args.wind_point_npz,
+                args.wind_grid_npz,
+                hparams.get("wind_norm", "normal"),
+            ),
         )
 
     print("=== Test start ===\n")

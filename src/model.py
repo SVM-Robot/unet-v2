@@ -41,6 +41,30 @@ class UpsampleBlock(nn.Module):
         return self.up_block(x)
 
 
+class FiLM(nn.Module):
+    def __init__(self, wind_dim: int, channels: int):
+        super().__init__()
+
+        self.mlp = nn.Sequential(
+            nn.Linear(wind_dim, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, channels * 2),
+        )
+
+        # Start close to identity modulation
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+        self.channels = channels
+
+    def forward(self, features: torch.Tensor, wind: torch.Tensor) -> torch.Tensor:
+        params = self.mlp(wind)
+        gamma, beta = params.chunk(2, dim=1)
+        gamma = gamma.view(-1, self.channels, 1, 1)
+        beta = beta.view(-1, self.channels, 1, 1)
+        return (1 + gamma) * features + beta
+
+
 class UNet4(nn.Module):
     def __init__(
         self, 
@@ -50,9 +74,27 @@ class UNet4(nn.Module):
         depth: int = 4,
         batch_norm=False, 
         dropout_rate: float = 0,
-        bi_upsample=False
+        bi_upsample=False,
+        wind_mode: str = "none",
+        wind_dim: int = 0,
     ):
         super().__init__()
+        self.wind_mode = wind_mode
+        if wind_mode.startswith("film"):
+            if wind_dim <= 0:
+                raise ValueError(f"{wind_mode} requires a positive wind_dim")
+            self.film = FiLM(wind_dim, base_channels * 16)
+        if wind_mode == "film_grid_cnn":
+            self.wind_encoder = nn.Sequential(
+                nn.Conv2d(2, 16, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(16, 32, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(32, wind_dim),
+                nn.ReLU(inplace=True),
+            )
 
         # 4 encoding levels
         self.enc1 = DoubleConv(in_channels, base_channels, batch_norm=batch_norm)
@@ -94,7 +136,24 @@ class UNet4(nn.Module):
 
         self.out_conv = nn.Conv2d(base_channels, out_channels, kernel_size=1)
 
-    def forward(self, x):
+    def _condition(self, wind: torch.Tensor) -> torch.Tensor:
+        if self.wind_mode == "film_grid_flat":
+            return wind.flatten(1)
+        if self.wind_mode == "film_grid_cnn":
+            return self.wind_encoder(wind)
+        return wind
+
+    # keep this here for now
+    def _modulate(self, index: int, features: torch.Tensor, wind: torch.Tensor | None) -> torch.Tensor:
+        if wind is None:
+            return features
+        return self.films[index](features, wind)
+
+    def forward(self, x, wind: torch.Tensor | None = None):
+        if self.wind_mode.startswith("film"):
+            if wind is None:
+                raise ValueError(f"{self.wind_mode} requires a wind tensor")
+            wind = self._condition(wind)
         skip1 = self.enc1(x)
         x = self.pool1(skip1)
         x = self.dropout1(x)
@@ -113,7 +172,8 @@ class UNet4(nn.Module):
         
         x = self.bottleneck(x)
         x = self.dropout5(x)
-        
+        if wind is not None:
+            x = self.film(x, wind)
 
         x = self.up4(x)
         x = torch.cat([x, skip4], dim=1)

@@ -6,6 +6,7 @@ from lightning.pytorch import LightningModule
 
 from src.model import UNet4
 from src.utils import dice_score_oil, water_false_positive_rate, predict_full_image, dice_score_from_probs, iou_score_from_probs
+from src.wind import WIND_MODES
 
 
 class OilSpillLitModule(LightningModule):
@@ -25,13 +26,15 @@ class OilSpillLitModule(LightningModule):
         infer_overlap: float = 0.25,
         loss_type: str = "bce",
         wind_mode: str = "none",
+        wind_dim: int = 0,
+        wind_norm: str = "normal",
         wind_mean: list[float] | None = None,
         wind_std: list[float] | None = None,
     ):
         super().__init__()
         self.save_hyperparameters()
 
-        if wind_mode not in {"none", "point_channels"}:
+        if wind_mode not in WIND_MODES:
             raise ValueError(f"Unsupported wind_mode {wind_mode!r}")
         # Older checkpoints stored these buffers. Normalization now happens in WindTable.
         if wind_mean is not None and wind_std is not None:
@@ -46,6 +49,8 @@ class OilSpillLitModule(LightningModule):
             batch_norm=batch_norm,
             dropout_rate=dropout_rate,
             bi_upsample=bi_upsample,
+            wind_mode=wind_mode if wind_mode.startswith("film") else "none",
+            wind_dim=wind_dim,
         )
 
         # Moves with the module to the correct device automatically.
@@ -61,6 +66,11 @@ class OilSpillLitModule(LightningModule):
                 raise ValueError("point_channels model requires a wind vector")
             wind = wind[:, :, None, None].expand(-1, -1, x.shape[-2], x.shape[-1])
             x = torch.cat([x, wind], dim=1)
+            return self.model(x)
+        if self.hparams.wind_mode.startswith("film"):
+            if wind is None:
+                raise ValueError(f"{self.hparams.wind_mode} requires a wind tensor")
+            return self.model(x, wind)
         return self.model(x)
 
     def _compute_loss(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
